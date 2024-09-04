@@ -455,12 +455,11 @@ def _calc_r_x_y_from_dataframe(net, trafo_df, vn_trafo_lv, vn_lv, ppc, sequence=
         else:
             g, b = 0, 0  # why for sc are we assigning y directly as 0?
         if isinstance(trafo_df, pd.DataFrame):  # 2w trafo is dataframe, 3w trafo is dict
-            bus_lookup = net._pd2ppc_lookups["bus"]
-            cmax = ppc["bus"][bus_lookup[net.trafo.lv_bus.values], C_MAX]
-            # todo: kt is only used for case = max and only for network transformers! (IEC 60909-0:2016 section 6.3.3)
-            # kt is only calculated for network transformers (IEC 60909-0:2016 section 6.3.3)
             if not net._options.get("use_pre_fault_voltage", False):
-                kt = _transformer_correction_factor(trafo_df, trafo_df.vk_percent, trafo_df.vkr_percent, trafo_df.sn_mva, cmax)
+                bus_lookup = net._pd2ppc_lookups["bus"]
+                cmax = ppc["bus"][bus_lookup[net.trafo.lv_bus.values], C_MAX]
+                case = net._options["case"]
+                kt = _transformer_correction_factor(trafo_df, trafo_df.vk_percent, trafo_df.vkr_percent, trafo_df.sn_mva, cmax, case)
                 r *= kt
                 x *= kt
     else:
@@ -730,6 +729,7 @@ def _calc_r_x_from_dataframe(mode, trafo_df, vn_lv, vn_trafo_lv, sn_mva, sequenc
 def _calc_nominal_ratio_from_dataframe(ppc, trafo_df, vn_hv_kv, vn_lv_kv, bus_lookup):
     """
     Calculates (Vectorized) the off nominal tap ratio::
+
                   (vn_hv_kv / vn_lv_kv) / (ub1_in_kv / ub2_in_kv)
 
     INPUT:
@@ -1140,7 +1140,7 @@ def _end_temperature_correction_factor(net, short_circuit=False, dc=False):
     return r_correction_for_temperature
 
 
-def _transformer_correction_factor(trafo_df, vk, vkr, sn, cmax):
+def _transformer_correction_factor(trafo_df, vk, vkr, sn, cmax, case):
     """
         2W-Transformer impedance correction factor in short circuit calculations,
         based on the IEC 60909-0:2016 standard.
@@ -1149,6 +1149,7 @@ def _transformer_correction_factor(trafo_df, vk, vkr, sn, cmax):
             vkr: real-part of transformer short-circuit voltage, percent
             sn: transformer rating, kVA
             cmax: voltage factor to account for maximum worst-case currents, based on the lv side
+            case: short-circuit calculation case (str, "min"/"max")
 
         Returns:
             kt: transformer impedance correction factor for short-circuit calculations
@@ -1157,7 +1158,12 @@ def _transformer_correction_factor(trafo_df, vk, vkr, sn, cmax):
     ----------
     trafo_df
 
-        """
+    """
+
+    # The transformer correction factor shall only be applied in the max case according to
+    # norm IEC 60909-0:2016 section 6.3.3
+    if case != "max":
+        return np.ones(len(trafo_df))
 
     if "power_station_unit" in trafo_df.columns:
         power_station_unit = trafo_df.power_station_unit.fillna(False).values.astype(bool)
@@ -1191,13 +1197,15 @@ def _trafo_df_from_trafo3w(net, sequence=1, update_vk_values=True):
     nr_trafos = len(net["trafo3w"])
     if sequence==1:
         mode_tmp = "type_c" if mode == "sc" and net._options.get("use_pre_fault_voltage", False) else mode
-        _calculate_sc_voltages_of_equivalent_transformers(t3, trafo2, mode_tmp, characteristic=net.get(
+        case = net._options.get("case", False) if "case" in net._options else "max"
+        _calculate_sc_voltages_of_equivalent_transformers(t3, trafo2, mode_tmp, case, characteristic=net.get(
             'characteristic'), update_vk_values=update_vk_values)
     elif sequence==0:
         if mode != "sc":
             raise NotImplementedError(
                 "0 seq impedance calculation only implemented for short-circuit calculation!")
-        _calculate_sc_voltages_of_equivalent_transformers_zero_sequence(t3, trafo2,)
+        case = net._options.get("case", False) if "case" in net._options else "max"
+        _calculate_sc_voltages_of_equivalent_transformers_zero_sequence(t3, trafo2, case)
     else:
         raise UserWarning("Unsupported sequence for trafo3w convertion")
     _calculate_3w_tap_changers(t3, trafo2, sides)
@@ -1226,7 +1234,7 @@ def _trafo_df_from_trafo3w(net, sequence=1, update_vk_values=True):
     return {var: np.concatenate([trafo2[var][side] for side in sides]) for var in trafo2.keys()}
 
 
-def _calculate_sc_voltages_of_equivalent_transformers(t3, t2, mode, characteristic, update_vk_values=True):
+def _calculate_sc_voltages_of_equivalent_transformers(t3, t2, mode, case, characteristic, update_vk_values=True):
     if update_vk_values:
         vk_hv, vkr_hv, vk_mv, vkr_mv, vk_lv, vkr_lv = _get_vk_values(t3, characteristic, "3W")
     else:
@@ -1240,7 +1248,7 @@ def _calculate_sc_voltages_of_equivalent_transformers(t3, t2, mode, characterist
     vk_2w_delta = z_br_to_bus_vector(vk_3w, sn)
     vkr_2w_delta = z_br_to_bus_vector(vkr_3w, sn)
     if mode == "sc":
-        kt = _transformer_correction_factor(t3, vk_3w, vkr_3w, sn, 1.1)
+        kt = _transformer_correction_factor(t3, vk_3w, vkr_3w, sn, 1.1, case)
         vk_2w_delta *= kt
         vkr_2w_delta *= kt
     vki_2w_delta = np.sqrt(vk_2w_delta ** 2 - vkr_2w_delta ** 2)
@@ -1254,7 +1262,7 @@ def _calculate_sc_voltages_of_equivalent_transformers(t3, t2, mode, characterist
     t2["sn_mva"] = {"hv": sn[0, :], "mv": sn[1, :], "lv": sn[2, :]}
 
 
-def _calculate_sc_voltages_of_equivalent_transformers_zero_sequence(t3, t2):
+def _calculate_sc_voltages_of_equivalent_transformers_zero_sequence(t3, t2, case):
     vk_3w = np.stack([t3.vk_hv_percent.values, t3.vk_mv_percent.values, t3.vk_lv_percent.values])
     vkr_3w = np.stack([t3.vkr_hv_percent.values, t3.vkr_mv_percent.values, t3.vkr_lv_percent.values])
     vk0_3w = np.stack([t3.vk0_hv_percent.values, t3.vk0_mv_percent.values, t3.vk0_lv_percent.values])
@@ -1265,7 +1273,7 @@ def _calculate_sc_voltages_of_equivalent_transformers_zero_sequence(t3, t2):
     vkr0_2w_delta = z_br_to_bus_vector(vkr0_3w, sn)
 
     # Only for "sc", calculated with positive sequence value
-    kt = _transformer_correction_factor(t3, vk_3w, vkr_3w, sn, 1.1)
+    kt = _transformer_correction_factor(t3, vk_3w, vkr_3w, sn, 1.1, case)
     vk0_2w_delta *= kt
     vkr0_2w_delta *= kt
 
