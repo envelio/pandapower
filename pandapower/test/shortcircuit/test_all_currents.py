@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright (c) 2016-2025 by University of Kassel and Fraunhofer Institute for Energy Economics
+# Copyright (c) 2016-2026 by University of Kassel and Fraunhofer Institute for Energy Economics
 # and Energy System Technology (IEE), Kassel. All rights reserved.
 
 
@@ -707,7 +707,6 @@ def test_trafo_3w():
     pass
 
 
-# Todo: "min" case does not work, since parameters are missing.
 @pytest.mark.parametrize("trafo_impedance_case", ["max", "min"])
 def test_trafo_impedance(trafo_impedance_case):
     case = trafo_impedance_case
